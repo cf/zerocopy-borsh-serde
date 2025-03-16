@@ -538,6 +538,35 @@ example of how it can be used for parsing UDP packets.
             }
         }
 
+        #[cfg(any(feature = "borsh", test))]
+        impl<O: ByteOrder> borsh::BorshSerialize for $name<O> {
+            fn serialize<W: borsh::maybestd::io::Write>(&self, writer: &mut W) -> borsh::maybestd::io::Result<()> {
+                borsh::BorshSerialize::serialize(&self.get(), writer)
+            }
+        }
+        #[cfg(any(feature = "borsh", test))]
+        impl<O: ByteOrder> borsh::BorshDeserialize for $name<O> {
+            fn deserialize_reader<R: borsh::maybestd::io::Read>(reader: &mut R) -> borsh::maybestd::io::Result<Self> {
+                let native_val = $native::deserialize_reader(reader)?;
+                Ok(native_val.into())
+            }
+        }
+        #[cfg(any(feature = "serde", test))]
+        impl<O: ByteOrder>  serde::Serialize for $name<O> {
+            fn serialize<S: serde::ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serde::Serialize::serialize(&self.get(), serializer)
+            }
+        }
+        #[cfg(any(feature = "serde", test))]
+        impl<'de, O: ByteOrder> serde::Deserialize<'de> for $name<O> {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de> {
+                let value = <$native as serde::Deserialize>::deserialize(deserializer)?;
+                Ok(value.into())
+            }
+        }
+
         impl<O: ByteOrder> $name<O> {
             maybe_const_trait_bounded_fn! {
                 /// Constructs a new value, possibly performing an endianness
@@ -1307,6 +1336,154 @@ mod tests {
         call_for_unsigned_types!(test_max_value, NativeEndian);
         call_for_unsigned_types!(test_max_value, NonNativeEndian);
     }
+
+    #[cfg_attr(test, test)]
+    #[cfg_attr(kani, kani::proof)]
+    fn test_serde() {
+        use serde::{Deserialize, Serialize, de::DeserializeOwned};
+        #[derive(Deserialize, Serialize, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+        struct TestSingleType<A> {
+            pub a: A,
+            pub a_arr: [A; 16],
+            pub a_vec: Vec<A>,
+        }
+        impl<A: DeserializeOwned + Serialize + ByteOrderType> TestSingleType<A> {
+            fn new_rand_with_seed(seed: u64) -> Self {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                Self::new_rand(&mut rng)
+            }
+            fn new_rand(rng: &mut SmallRng) -> Self {
+                Self {
+                    a: A::Native::rand(rng).into(),
+                    a_arr: core::array::from_fn(|_| A::Native::rand(rng).into()),
+                    a_vec: core::iter::from_fn(|| Some(A::Native::rand(rng).into())).take(16).collect(),
+                }
+            }
+        }
+        impl<A: DeserializeOwned + Serialize + Native> TestSingleType<A> {
+            fn new_rand_native_with_seed(seed: u64) -> Self {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                Self::new_rand_native(&mut rng)
+            }
+            fn new_rand_native(rng: &mut SmallRng) -> Self {
+                Self {
+                    a: A::rand(rng).into(),
+                    a_arr: core::array::from_fn(|_| A::rand(rng).into()),
+                    a_vec: core::iter::from_fn(|| Some(A::rand(rng).into())).take(16).collect(),
+                }
+            }
+        }
+        fn test<T: ByteOrderType + DeserializeOwned + Serialize>() where T::Native: DeserializeOwned + Serialize {
+            let mut r = SmallRng::seed_from_u64(RNG_SEED);
+            for _ in 0..RAND_ITERS {
+                let seed  = r.gen::<u64>();
+                let example_bot = TestSingleType::<T>::new_rand_with_seed(seed);
+                let example_native = TestSingleType::<T::Native>::new_rand_native_with_seed(seed);
+                assert_eq!(example_bot.a.get(), example_native.a);
+                let conv: [T::Native; 16] = example_bot.a_arr.map(|x|x.get());
+                assert_eq!(conv, example_native.a_arr);
+                let conv_vec: Vec<T::Native> = example_bot.a_vec.iter().map(|x|x.get()).collect::<Vec<_>>();
+                assert_eq!(conv_vec, example_native.a_vec);
+
+                let example_bot_bytes = bincode::serialize(&example_bot).unwrap();
+                let example_native_bytes = bincode::serialize(&example_native).unwrap();
+                assert_eq!(example_bot_bytes, example_native_bytes);
+                let example_bot_back: TestSingleType<T> = bincode::deserialize(&example_bot_bytes).unwrap();
+                let example_native_back: TestSingleType<T::Native> = bincode::deserialize(&example_native_bytes).unwrap();
+                assert_eq!(example_bot, example_bot_back);
+                assert_eq!(example_native, example_native_back);
+
+                assert_eq!(example_bot_back.a.get(), example_native_back.a);
+                let conv: [T::Native; 16] = example_bot_back.a_arr.map(|x|x.get());
+                assert_eq!(conv, example_native_back.a_arr);
+                let conv_vec: Vec<T::Native> = example_bot_back.a_vec.iter().map(|x|x.get()).collect::<Vec<_>>();
+                assert_eq!(conv_vec, example_native_back.a_vec);
+            }
+        }
+
+        call_for_unsigned_types!(test, NativeEndian);
+        call_for_unsigned_types!(test, NonNativeEndian);
+        
+    }
+    #[cfg_attr(test, test)]
+    #[cfg_attr(kani, kani::proof)]
+    fn test_borsh() {
+        use borsh::{BorshDeserialize, BorshSerialize};
+        #[derive(BorshDeserialize, BorshSerialize, Clone, Debug)]
+        struct TestDouble<A,B> {
+            pub a: A,
+            pub b: B,
+            pub a_arr: [A; 16],
+            pub b_arr: [B; 16],
+            pub a_vec: Vec<A>,
+            pub b_vec: Vec<B>,
+        }
+        #[derive(BorshDeserialize, BorshSerialize, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+        struct TestSingleType<A> {
+            pub a: A,
+            pub a_arr: [A; 16],
+            pub a_vec: Vec<A>,
+        }
+        impl<A: BorshSerialize + BorshDeserialize + ByteOrderType> TestSingleType<A> {
+            fn new_rand_with_seed(seed: u64) -> Self {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                Self::new_rand(&mut rng)
+            }
+            fn new_rand(rng: &mut SmallRng) -> Self {
+                Self {
+                    a: A::Native::rand(rng).into(),
+                    a_arr: core::array::from_fn(|_| A::Native::rand(rng).into()),
+                    a_vec: core::iter::from_fn(|| Some(A::Native::rand(rng).into())).take(16).collect(),
+                }
+            }
+        }
+        impl<A: BorshSerialize + BorshDeserialize + Native> TestSingleType<A> {
+            fn new_rand_native_with_seed(seed: u64) -> Self {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                Self::new_rand_native(&mut rng)
+            }
+            fn new_rand_native(rng: &mut SmallRng) -> Self {
+                Self {
+                    a: A::rand(rng).into(),
+                    a_arr: core::array::from_fn(|_| A::rand(rng).into()),
+                    a_vec: core::iter::from_fn(|| Some(A::rand(rng).into())).take(16).collect(),
+                }
+            }
+        }
+        fn test<T: ByteOrderType + BorshSerialize + BorshDeserialize>() where T::Native: BorshSerialize + BorshDeserialize {
+            let mut r = SmallRng::seed_from_u64(RNG_SEED);
+            for _ in 0..RAND_ITERS {
+                let seed  = r.gen::<u64>();
+                let example_bot = TestSingleType::<T>::new_rand_with_seed(seed);
+                let example_native = TestSingleType::<T::Native>::new_rand_native_with_seed(seed);
+                assert_eq!(example_bot.a.get(), example_native.a);
+                let conv: [T::Native; 16] = example_bot.a_arr.map(|x|x.get());
+                assert_eq!(conv, example_native.a_arr);
+                let conv_vec: Vec<T::Native> = example_bot.a_vec.iter().map(|x|x.get()).collect::<Vec<_>>();
+                assert_eq!(conv_vec, example_native.a_vec);
+
+                let example_bot_bytes = borsh::to_vec(&example_bot).unwrap();
+                let example_native_bytes = borsh::to_vec(&example_native).unwrap();
+                assert_eq!(example_bot_bytes, example_native_bytes);
+                let example_bot_back: TestSingleType<T> = borsh::BorshDeserialize::try_from_slice(&example_bot_bytes).unwrap();
+                let example_native_back: TestSingleType<T::Native> = borsh::BorshDeserialize::try_from_slice(&example_native_bytes).unwrap();
+                assert_eq!(example_bot, example_bot_back);
+                assert_eq!(example_native, example_native_back);
+
+                assert_eq!(example_bot_back.a.get(), example_native_back.a);
+                let conv: [T::Native; 16] = example_bot_back.a_arr.map(|x|x.get());
+                assert_eq!(conv, example_native_back.a_arr);
+                let conv_vec: Vec<T::Native> = example_bot_back.a_vec.iter().map(|x|x.get()).collect::<Vec<_>>();
+                assert_eq!(conv_vec, example_native_back.a_vec);
+            }
+        }
+
+        call_for_unsigned_types!(test, NativeEndian);
+        call_for_unsigned_types!(test, NonNativeEndian);
+        
+    }
+
+
 
     #[cfg_attr(test, test)]
     #[cfg_attr(kani, kani::proof)]
