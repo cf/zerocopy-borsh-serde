@@ -566,6 +566,26 @@ example of how it can be used for parsing UDP packets.
                 Ok(value.into())
             }
         }
+        #[cfg(any(feature = "speedy", test))]
+        impl<O: ByteOrder, C: speedy::Context> speedy::Writable<C> for $name<O> {
+            fn write_to<TBF: ?Sized + speedy::Writer<C>>(&self, writer: &mut TBF) -> std::result::Result<(), C::Error> {
+                speedy::Writable::write_to(&self.get(), writer)
+            }
+        }
+
+        #[cfg(any(feature = "speedy", test))]
+        impl<'a, C: speedy::Context, O: ByteOrder> speedy::Readable<'a, C> for $name<O> {
+            fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> std::result::Result<Self, C::Error> {
+                let native = <$native as speedy::Readable<'a, C>>::read_from(reader)?;
+                Ok(native.into())
+            }
+        }
+
+
+        #[cfg(any(feature = "bytemuck", test))]
+        unsafe impl<O: ByteOrder> bytemuck::Zeroable for $name<O> {}
+        #[cfg(any(feature = "bytemuck", test))]
+        unsafe impl<O: ByteOrder + 'static> bytemuck::Pod for $name<O> {}
 
         impl<O: ByteOrder> $name<O> {
             maybe_const_trait_bounded_fn! {
@@ -726,6 +746,301 @@ example of how it can be used for parsing UDP packets.
     };
 }
 
+
+macro_rules! define_type_old {
+    (
+        $article:ident,
+        $description:expr,
+        $name:ident,
+        $native:ident,
+        $bits:expr,
+        $bytes:expr,
+        $from_be_fn:path,
+        $to_be_fn:path,
+        $from_le_fn:path,
+        $to_le_fn:path,
+        $number_kind:tt,
+        [$($larger_native:ty),*],
+        [$($larger_native_try:ty),*],
+        [$($larger_byteorder:ident),*],
+        [$($larger_byteorder_try:ident),*]
+    ) => {
+        doc_comment! {
+            concat!($description, " stored in a given byte order.
+
+`", stringify!($name), "` is like the native `", stringify!($native), "` type with
+two major differences: First, it has no alignment requirement (its alignment is 1).
+Second, the endianness of its memory layout is given by the type parameter `O`,
+which can be any type which implements [`ByteOrder`]. In particular, this refers
+to [`BigEndian`], [`LittleEndian`], [`NativeEndian`], and [`NetworkEndian`].
+
+", stringify!($article), " `", stringify!($name), "` can be constructed using
+the [`new`] method, and its contained value can be obtained as a native
+`",stringify!($native), "` using the [`get`] method, or updated in place with
+the [`set`] method. In all cases, if the endianness `O` is not the same as the
+endianness of the current platform, an endianness swap will be performed in
+order to uphold the invariants that a) the layout of `", stringify!($name), "`
+has endianness `O` and that, b) the layout of `", stringify!($native), "` has
+the platform's native endianness.
+
+`", stringify!($name), "` implements [`FromBytes`], [`IntoBytes`], and [`Unaligned`],
+making it useful for parsing and serialization. See the module documentation for an
+example of how it can be used for parsing UDP packets.
+
+[`new`]: crate::byteorder::", stringify!($name), "::new
+[`get`]: crate::byteorder::", stringify!($name), "::get
+[`set`]: crate::byteorder::", stringify!($name), "::set
+[`FromBytes`]: crate::FromBytes
+[`IntoBytes`]: crate::IntoBytes
+[`Unaligned`]: crate::Unaligned"),
+            #[derive(Copy, Clone, Eq, PartialEq, Hash)]
+            #[cfg_attr(any(feature = "derive", test), derive(KnownLayout, Immutable, FromBytes, IntoBytes, Unaligned))]
+            #[repr(transparent)]
+            pub struct $name<O>([u8; $bytes], PhantomData<O>);
+        }
+
+        #[cfg(not(any(feature = "derive", test)))]
+        impl_known_layout!(O => $name<O>);
+
+        safety_comment! {
+            /// SAFETY:
+            /// `$name<O>` is `repr(transparent)`, and so it has the same layout
+            /// as its only non-zero field, which is a `u8` array. `u8` arrays
+            /// are `Immutable`, `TryFromBytes`, `FromZeros`, `FromBytes`,
+            /// `IntoBytes`, and `Unaligned`.
+            impl_or_verify!(O => Immutable for $name<O>);
+            impl_or_verify!(O => TryFromBytes for $name<O>);
+            impl_or_verify!(O => FromZeros for $name<O>);
+            impl_or_verify!(O => FromBytes for $name<O>);
+            impl_or_verify!(O => IntoBytes for $name<O>);
+            impl_or_verify!(O => Unaligned for $name<O>);
+        }
+
+        impl<O> Default for $name<O> {
+            #[inline(always)]
+            fn default() -> $name<O> {
+                $name::ZERO
+            }
+        }
+
+        impl<O> $name<O> {
+            /// The value zero.
+            ///
+            /// This constant should be preferred to constructing a new value
+            /// using `new`, as `new` may perform an endianness swap depending
+            /// on the endianness and platform.
+            pub const ZERO: $name<O> = $name([0u8; $bytes], PhantomData);
+
+            define_max_value_constant!($name, $bytes, $number_kind);
+
+            /// Constructs a new value from bytes which are already in `O` byte
+            /// order.
+            #[must_use = "has no side effects"]
+            #[inline(always)]
+            pub const fn from_bytes(bytes: [u8; $bytes]) -> $name<O> {
+                $name(bytes, PhantomData)
+            }
+
+            /// Extracts the bytes of `self` without swapping the byte order.
+            ///
+            /// The returned bytes will be in `O` byte order.
+            #[must_use = "has no side effects"]
+            #[inline(always)]
+            pub const fn to_bytes(self) -> [u8; $bytes] {
+                self.0
+            }
+        }
+
+        #[cfg(any(feature = "borsh", test))]
+        impl<O: ByteOrder> borsh::BorshSerialize for $name<O> {
+            fn serialize<W: borsh::maybestd::io::Write>(&self, writer: &mut W) -> borsh::maybestd::io::Result<()> {
+                borsh::BorshSerialize::serialize(&self.get(), writer)
+            }
+        }
+        #[cfg(any(feature = "borsh", test))]
+        impl<O: ByteOrder> borsh::BorshDeserialize for $name<O> {
+            fn deserialize_reader<R: borsh::maybestd::io::Read>(reader: &mut R) -> borsh::maybestd::io::Result<Self> {
+                let native_val = $native::deserialize_reader(reader)?;
+                Ok(native_val.into())
+            }
+        }
+        #[cfg(any(feature = "serde", test))]
+        impl<O: ByteOrder>  serde::Serialize for $name<O> {
+            fn serialize<S: serde::ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serde::Serialize::serialize(&self.get(), serializer)
+            }
+        }
+        #[cfg(any(feature = "serde", test))]
+        impl<'de, O: ByteOrder> serde::Deserialize<'de> for $name<O> {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de> {
+                let value = <$native as serde::Deserialize>::deserialize(deserializer)?;
+                Ok(value.into())
+            }
+        }
+
+        impl<O: ByteOrder> $name<O> {
+            maybe_const_trait_bounded_fn! {
+                /// Constructs a new value, possibly performing an endianness
+                /// swap to guarantee that the returned value has endianness
+                /// `O`.
+                #[must_use = "has no side effects"]
+                #[inline(always)]
+                pub const fn new(n: $native) -> $name<O> {
+                    let bytes = match O::ORDER {
+                        Order::BigEndian => $to_be_fn(n),
+                        Order::LittleEndian => $to_le_fn(n),
+                    };
+
+                    $name(bytes, PhantomData)
+                }
+            }
+
+            maybe_const_trait_bounded_fn! {
+                /// Returns the value as a primitive type, possibly performing
+                /// an endianness swap to guarantee that the return value has
+                /// the endianness of the native platform.
+                #[must_use = "has no side effects"]
+                #[inline(always)]
+                pub const fn get(self) -> $native {
+                    match O::ORDER {
+                        Order::BigEndian => $from_be_fn(self.0),
+                        Order::LittleEndian => $from_le_fn(self.0),
+                    }
+                }
+            }
+
+            /// Updates the value in place as a primitive type, possibly
+            /// performing an endianness swap to guarantee that the stored value
+            /// has the endianness `O`.
+            #[inline(always)]
+            pub fn set(&mut self, n: $native) {
+                *self = Self::new(n);
+            }
+        }
+
+        // The reasoning behind which traits to implement here is to only
+        // implement traits which won't cause inference issues. Notably,
+        // comparison traits like PartialEq and PartialOrd tend to cause
+        // inference issues.
+
+        impl<O: ByteOrder> From<$name<O>> for [u8; $bytes] {
+            #[inline(always)]
+            fn from(x: $name<O>) -> [u8; $bytes] {
+                x.0
+            }
+        }
+
+        impl<O: ByteOrder> From<[u8; $bytes]> for $name<O> {
+            #[inline(always)]
+            fn from(bytes: [u8; $bytes]) -> $name<O> {
+                $name(bytes, PhantomData)
+            }
+        }
+
+        impl<O: ByteOrder> From<$name<O>> for $native {
+            #[inline(always)]
+            fn from(x: $name<O>) -> $native {
+                x.get()
+            }
+        }
+
+        impl<O: ByteOrder> From<$native> for $name<O> {
+            #[inline(always)]
+            fn from(x: $native) -> $name<O> {
+                $name::new(x)
+            }
+        }
+
+        $(
+            impl<O: ByteOrder> From<$name<O>> for $larger_native {
+                #[inline(always)]
+                fn from(x: $name<O>) -> $larger_native {
+                    x.get().into()
+                }
+            }
+        )*
+
+        $(
+            impl<O: ByteOrder> TryFrom<$larger_native_try> for $name<O> {
+                type Error = TryFromIntError;
+                #[inline(always)]
+                fn try_from(x: $larger_native_try) -> Result<$name<O>, TryFromIntError> {
+                    $native::try_from(x).map($name::new)
+                }
+            }
+        )*
+
+        $(
+            impl<O: ByteOrder, P: ByteOrder> From<$name<O>> for $larger_byteorder<P> {
+                #[inline(always)]
+                fn from(x: $name<O>) -> $larger_byteorder<P> {
+                    $larger_byteorder::new(x.get().into())
+                }
+            }
+        )*
+
+        $(
+            impl<O: ByteOrder, P: ByteOrder> TryFrom<$larger_byteorder_try<P>> for $name<O> {
+                type Error = TryFromIntError;
+                #[inline(always)]
+                fn try_from(x: $larger_byteorder_try<P>) -> Result<$name<O>, TryFromIntError> {
+                    x.get().try_into().map($name::new)
+                }
+            }
+        )*
+
+        impl<O> AsRef<[u8; $bytes]> for $name<O> {
+            #[inline(always)]
+            fn as_ref(&self) -> &[u8; $bytes] {
+                &self.0
+            }
+        }
+
+        impl<O> AsMut<[u8; $bytes]> for $name<O> {
+            #[inline(always)]
+            fn as_mut(&mut self) -> &mut [u8; $bytes] {
+                &mut self.0
+            }
+        }
+
+        impl<O> PartialEq<$name<O>> for [u8; $bytes] {
+            #[inline(always)]
+            fn eq(&self, other: &$name<O>) -> bool {
+                self.eq(&other.0)
+            }
+        }
+
+        impl<O> PartialEq<[u8; $bytes]> for $name<O> {
+            #[inline(always)]
+            fn eq(&self, other: &[u8; $bytes]) -> bool {
+                self.0.eq(other)
+            }
+        }
+
+        impl<O: ByteOrder> PartialEq<$native> for $name<O> {
+            #[inline(always)]
+            fn eq(&self, other: &$native) -> bool {
+                self.get().eq(other)
+            }
+        }
+
+        impl_fmt_traits!($name, $native, $number_kind);
+        impl_ops_traits!($name, $native, $number_kind);
+
+        impl<O: ByteOrder> Debug for $name<O> {
+            #[inline]
+            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                // This results in a format like "U16(42)".
+                f.debug_tuple(stringify!($name)).field(&self.get()).finish()
+            }
+        }
+    };
+}
+
+
+
 define_type!(
     A,
     "A 16-bit unsigned integer",
@@ -879,7 +1194,7 @@ define_type!(
     [],
     []
 );
-define_type!(
+define_type_old!(
     An,
     "A word-sized signed integer",
     Isize,
@@ -1253,6 +1568,15 @@ mod tests {
         };
     }
 
+    macro_rules! call_for_signed_types_except_isize {
+        ($fn:ident, $byteorder:ident) => {
+            $fn::<I16<$byteorder>>();
+            $fn::<I32<$byteorder>>();
+            $fn::<I64<$byteorder>>();
+            $fn::<I128<$byteorder>>();
+        };
+    }
+
     macro_rules! call_for_float_types {
         ($fn:ident, $byteorder:ident) => {
             $fn::<F32<$byteorder>>();
@@ -1264,6 +1588,13 @@ mod tests {
         ($fn:ident, $byteorder:ident) => {
             call_for_unsigned_types!($fn, $byteorder);
             call_for_signed_types!($fn, $byteorder);
+            call_for_float_types!($fn, $byteorder);
+        };
+    }
+    macro_rules! call_for_all_types_except_isize {
+        ($fn:ident, $byteorder:ident) => {
+            call_for_unsigned_types!($fn, $byteorder);
+            call_for_signed_types_except_isize!($fn, $byteorder);
             call_for_float_types!($fn, $byteorder);
         };
     }
@@ -1404,6 +1735,137 @@ mod tests {
         call_for_unsigned_types!(test, NativeEndian);
         call_for_unsigned_types!(test, NonNativeEndian);
         
+    }
+
+    #[cfg_attr(test, test)]
+    #[cfg_attr(kani, kani::proof)]
+    fn test_bytemuck() {
+        use bytemuck::{Pod, Zeroable};
+
+        fn test<T: ByteOrderType + Pod + Zeroable>() {
+            // Test Zeroable
+            let zeroed = T::zeroed();
+            assert_eq!(zeroed.get(), T::Native::ZERO);
+
+            // Test Pod (casting)
+            let mut rng = SmallRng::seed_from_u64(RNG_SEED);
+            let native = T::Native::rand(&mut rng);
+            let val = T::new(native);
+            
+            // Verify we can cast bytes to T
+            let bytes = val.into_bytes();
+            let cast_val: &T = bytemuck::try_from_bytes(bytes.as_ref()).expect("cast failed");
+            assert_eq!(cast_val.get(), native);
+            
+            // Verify we can cast T to bytes
+            let bytes_back: &[u8] = bytemuck::bytes_of(&val);
+            assert_eq!(bytes_back, bytes.as_ref());
+        }
+
+        call_for_all_types_except_isize!(test, NativeEndian);
+        call_for_all_types_except_isize!(test, NonNativeEndian);
+    }
+
+    #[cfg_attr(test, test)]
+    #[cfg_attr(kani, kani::proof)]
+    fn test_speedy() {
+        use speedy::{Readable, Writable};
+
+        #[derive(Readable, Writable, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+        struct TestSingleType<A> {
+            pub a: A,
+            pub a_arr: [A; 16],
+            pub a_vec: Vec<A>,
+        }
+
+        impl<A: ByteOrderType> TestSingleType<A> {
+            fn new_rand_with_seed(seed: u64) -> Self {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                Self::new_rand(&mut rng)
+            }
+            fn new_rand(rng: &mut SmallRng) -> Self {
+                Self {
+                    a: A::Native::rand(rng).into(),
+                    a_arr: core::array::from_fn(|_| A::Native::rand(rng).into()),
+                    a_vec: core::iter::from_fn(|| Some(A::Native::rand(rng).into()))
+                        .take(16)
+                        .collect(),
+                }
+            }
+        }
+
+        impl<A: Native> TestSingleType<A> {
+            fn new_rand_native_with_seed(seed: u64) -> Self {
+                let mut rng = SmallRng::seed_from_u64(seed);
+                Self::new_rand_native(&mut rng)
+            }
+            fn new_rand_native(rng: &mut SmallRng) -> Self {
+                Self {
+                    a: A::rand(rng).into(),
+                    a_arr: core::array::from_fn(|_| A::rand(rng).into()),
+                    a_vec: core::iter::from_fn(|| Some(A::rand(rng).into()))
+                        .take(16)
+                        .collect(),
+                }
+            }
+        }
+
+        fn test<T>()
+        where
+            T: ByteOrderType
+                + Writable<speedy::LittleEndian>
+                + for<'a> Readable<'a, speedy::LittleEndian>,
+            T::Native: Writable<speedy::LittleEndian> + for<'a> Readable<'a, speedy::LittleEndian>,
+        {
+            let mut r = SmallRng::seed_from_u64(RNG_SEED);
+            for _ in 0..RAND_ITERS {
+                let seed = r.gen::<u64>();
+                let example_bot = TestSingleType::<T>::new_rand_with_seed(seed);
+                let example_native = TestSingleType::<T::Native>::new_rand_native_with_seed(seed);
+
+                // Consistency check (data match)
+                assert_eq!(example_bot.a.get(), example_native.a);
+                let conv: [T::Native; 16] = example_bot.a_arr.map(|x| x.get());
+                assert_eq!(conv, example_native.a_arr);
+                let conv_vec: Vec<T::Native> = example_bot
+                    .a_vec
+                    .iter()
+                    .map(|x| x.get())
+                    .collect::<Vec<_>>();
+                assert_eq!(conv_vec, example_native.a_vec);
+
+                // Serialization check
+                let example_bot_bytes = example_bot.write_to_vec().unwrap();
+                let example_native_bytes = example_native.write_to_vec().unwrap();
+
+                // Since we convert to native before serializing, bytes should match exactly
+                // provided speedy context is the same (default LittleEndian)
+                assert_eq!(&example_bot_bytes, &example_native_bytes);
+
+                // Deserialization check
+                let example_bot_back: TestSingleType<T> =
+                    TestSingleType::read_from_buffer(&example_bot_bytes).unwrap();
+                let example_native_back: TestSingleType<T::Native> =
+                    TestSingleType::read_from_buffer(&example_native_bytes).unwrap();
+
+                assert_eq!(example_bot, example_bot_back);
+                assert_eq!(example_native, example_native_back);
+
+                // Deep check of deserialized values
+                assert_eq!(example_bot_back.a.get(), example_native_back.a);
+                let conv: [T::Native; 16] = example_bot_back.a_arr.map(|x| x.get());
+                assert_eq!(conv, example_native_back.a_arr);
+                let conv_vec: Vec<T::Native> = example_bot_back
+                    .a_vec
+                    .iter()
+                    .map(|x| x.get())
+                    .collect::<Vec<_>>();
+                assert_eq!(conv_vec, example_native_back.a_vec);
+            }
+        }
+
+        call_for_all_types_except_isize!(test, NativeEndian);
+        call_for_all_types_except_isize!(test, NonNativeEndian);
     }
     #[cfg_attr(test, test)]
     #[cfg_attr(kani, kani::proof)]
