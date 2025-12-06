@@ -568,14 +568,25 @@ example of how it can be used for parsing UDP packets.
         }
         #[cfg(any(feature = "speedy", test))]
         impl<O: ByteOrder, C: speedy::Context> speedy::Writable<C> for $name<O> {
+            #[cfg(feature = "std")]
             fn write_to<TBF: ?Sized + speedy::Writer<C>>(&self, writer: &mut TBF) -> std::result::Result<(), C::Error> {
+                speedy::Writable::write_to(&self.get(), writer)
+            }
+            #[cfg(not(feature = "std"))]
+            fn write_to<TBF: ?Sized + speedy::Writer<C>>(&self, writer: &mut TBF) -> core::result::Result<(), C::Error> {
                 speedy::Writable::write_to(&self.get(), writer)
             }
         }
 
         #[cfg(any(feature = "speedy", test))]
         impl<'a, C: speedy::Context, O: ByteOrder> speedy::Readable<'a, C> for $name<O> {
+            #[cfg(feature = "std")]
             fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> std::result::Result<Self, C::Error> {
+                let native = <$native as speedy::Readable<'a, C>>::read_from(reader)?;
+                Ok(native.into())
+            }
+            #[cfg(not(feature = "std"))]
+            fn read_from<R: speedy::Reader<'a, C>>(reader: &mut R) -> core::result::Result<Self, C::Error> {
                 let native = <$native as speedy::Readable<'a, C>>::read_from(reader)?;
                 Ok(native.into())
             }
